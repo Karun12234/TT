@@ -2655,16 +2655,48 @@ else:
         do_live_autorefresh(enabled=True, interval_ms=15000, key="hot_auto_refresh")
 
     should_run = generate_hot or (auto_hot and up_or_end == "inplay")
-    # Keep the last generated Hot Sheets in session so downloads / reruns don't wipe the UI
+    
+    # --- State Initialization (Corrected) ---
     if "hot_last" not in st.session_state:
         st.session_state["hot_last"] = None
-
     if "hot_expand_open" not in st.session_state:
         st.session_state["hot_expand_open"] = False
+    if "hot_processed_ids" not in st.session_state:
+        st.session_state["hot_processed_ids"] = set()
+    if "hot_processed_rows" not in st.session_state:
+        st.session_state["hot_processed_rows"] = []
+    if "hot_processed_panels" not in st.session_state:
+        st.session_state["hot_processed_panels"] = {} # Will be {lbl: [str, ...]}
+    if "hot_last_settings" not in st.session_state:
+        st.session_state["hot_last_settings"] = None
 
+    # --- Settings Check (Corrected) ---
+    # Create a unique key based on ALL settings that affect the output
+    current_settings = (
+        tuple(sorted(selected_keys)),
+        hi2_val, lo2_val, hi1_val, lo1_val,
+        use_high, use_low, use_mhigh, use_mlow,
+        min_h2h_required,
+        history_qty,
+        over_total_threshold,
+        set1_over_threshold,
+        only_actionable, # This was missing
+        hot_limit # This was missing
+    )
+    settings_changed = (st.session_state["hot_last_settings"] != current_settings)
 
-    if should_run and force_api:
+    # --- Force Refresh Logic (Corrected) ---
+    if (should_run and force_api) or (should_run and settings_changed):
         st.cache_data.clear()
+        st.session_state["hot_processed_ids"] = set()
+        st.session_state["hot_processed_rows"] = []
+        st.session_state["hot_processed_panels"] = {lbl: [] for lbl in selected_metric_labels} # Reset panels
+        st.session_state["hot_last_settings"] = current_settings # Store the new settings
+        if settings_changed and not force_api:
+            st.info("Settings changed. Re-calculating all matches...")
+        else:
+            st.info("Cache and processed list cleared. Re-calculating all matches...")
+
 
     # load matchups using the SAME sidebar controls (mode/league/date/tz)
     with st.spinner("Loading candidate events for Hot Sheets..."):
@@ -2709,7 +2741,7 @@ else:
         hot_events_display = hot_events_display.head(hot_limit).copy()
 
     
-
+    # This is Block 1 (from v27)
     if not should_run:
         # If we have a previous result, render it instead of bailing out
         if st.session_state["hot_last"] is not None:
@@ -2750,15 +2782,16 @@ else:
                     key="hot_cached_xlsx"
                 )
             st.stop()
-        else:
-            st.info("Configure thresholds/metrics and click **⚡ Generate / Refresh**.")
-            st.stop()
+        # else:
+        #    This is correct: if not should_run AND hot_last is None, we fall through
+        #    to the *next* 'if not should_run' block.
 
 
     if hot_events_display.empty:
         st.info("No events match your Hot Sheets filters/search.")
         st.stop()
 
+    
     # helpers
     def any_threshold_hit(p: float) -> bool:
         if p is None or pd.isna(p): return False
@@ -2809,20 +2842,53 @@ else:
         if metric_key == "p2_overall_win_pct":
             return ("Back **Player 2 to win**", "P2_WIN") if band in ("HIGH","MHIGH") else (None, None)
         return None, None
-
     
-
-    # generate
+    # This is Block 2 (from v27) - this is the one I broke
+    # This logic is correct: if we get here and should_run is *still* False,
+    # it means the button wasn't pressed AND we had no 'hot_last' to show,
+    # so we show the info message and stop.
     if not should_run:
         st.info("Configure thresholds/metrics and click **⚡ Generate / Refresh**.")
-    else:
-        with st.spinner("Building Hot Sheet across all matching events..."):
-            rows = []
-            per_metric_panels = {lbl: [] for lbl in selected_metric_labels}
-            progress = st.progress(0.0, text="Computing per-event metrics...")
-            totalN = len(hot_events_display)
+        st.stop()
 
-            for i, (_, r) in enumerate(hot_events_display.iterrows(), start=1):
+
+    # ===================================================================
+    # ==== START: MODIFIED LOGIC TO PROCESS ONLY *NEW* MATCHES ====
+    # ===================================================================
+    # This 'else' correctly pairs with the 'if not should_run:' block above
+    else:
+        # 1. Get ALL matches from the API/filters
+        all_event_ids = set(hot_events_display['event_id'].astype(str).tolist())
+        
+        # 2. Get what we've ALREADY processed from session state
+        processed_ids = st.session_state.get("hot_processed_ids", set())
+        
+        # 3. Find ONLY the new matches
+        new_event_ids = all_event_ids - processed_ids
+        
+        # 4. Create a DataFrame of ONLY new matches to loop over
+        events_to_process_df = hot_events_display[hot_events_display['event_id'].isin(new_event_ids)].copy()
+        
+        st.info(f"Found **{len(all_event_ids)}** total matches. Processing **{len(events_to_process_df)}** new matches.")
+
+        with st.spinner(f"Processing {len(events_to_process_df)} new matches..."):
+            rows_this_run = []  # Temp list for *this run only*
+            
+            # *** FIX 1: Load old panels from state instead of creating empty ones ***
+            per_metric_panels = st.session_state.get("hot_processed_panels", {})
+            # Ensure all *current* labels exist in the dict
+            for lbl in selected_metric_labels:
+                if lbl not in per_metric_panels:
+                    per_metric_panels[lbl] = []
+
+            progress = st.progress(0.0, text="Computing per-event metrics...")
+            
+            totalN = len(events_to_process_df)
+            if totalN == 0:
+                progress.progress(1.0, text="No new matches to process.")
+
+            # 5. Loop over NEW matches only
+            for i, (_, r) in enumerate(events_to_process_df.iterrows(), start=1):
                 eid = int(r["event_id"]) if str(r["event_id"]).isdigit() else r["event_id"]
                 home_nm = r.get("home_name", "")
                 away_nm = r.get("away_name", "")
@@ -2835,7 +2901,6 @@ else:
                 }
                 event_time = r.get("time")
 
-                # Get home/away PIDs for this event (for PID-accurate stats)
                 # Get home/away PIDs from the load_events call (r = row)
                 p1_pid = r.get("home_id")  # HOME = Player 1
                 p2_pid = r.get("away_id")  # AWAY = Player 2
@@ -3056,21 +3121,37 @@ else:
                         for rline in all_recs:
                             exploded = dict(row)   # base event columns (event_id, match, time, league, H2H_n, odds…)
                             exploded.update(rline) # add this single recommendation’s fields
-                            rows.append(exploded)
+                            rows_this_run.append(exploded)
                     else:
                         # Only add a single “no-rec” row when the user UNchecks "Only show actionable recs"
                         if not only_actionable:
-                            rows.append(dict(row))
+                            rows_this_run.append(dict(row))
 
                 except Exception as ex:
-                    rows.append({**base, "error": str(ex)})
+                    rows_this_run.append({**base, "error": str(ex)})
+
+                # 6. At the end of the loop, add this event to the processed set
+                st.session_state.setdefault("hot_processed_ids", set()).add(str(eid))
 
                 progress.progress(i/totalN, text=f"Computing per-event metrics... {i}/{totalN}")
 
-            hot_df = pd.DataFrame(rows)
+            # 7. Add the newly processed rows to the persistent list
+            st.session_state.setdefault("hot_processed_rows", []).extend(rows_this_run)
+            
+            # *** FIX 2: Save the *updated* panels back to session state ***
+            st.session_state["hot_processed_panels"] = per_metric_panels
+
+            # 8. Create the final DataFrame from the *full* persistent list
+            hot_df = pd.DataFrame(st.session_state.get("hot_processed_rows", []))
+            
+            # ===================================================================
+            # ==== END: MODIFIED LOGIC ====
+            # ===================================================================
+
 
             # panels
             for lbl in selected_metric_labels:
+                # *** FIX 3: Read from the *full* panel dict ***
                 panel = per_metric_panels.get(lbl) or []
                 with st.expander(f"📌 {lbl} — recommendations & last results", expanded=False):
                     if not panel:
@@ -3254,7 +3335,7 @@ else:
 
                         pct_like_headers = headers[:]  # already display names
                         pct_cols_excel = [i for i,h in enumerate(pct_like_headers)
-                                        if (h.endswith("_pct") or h.startswith("pct_") or h.endswith("_over_pct") or h == "Rec Prob %")]
+                                        if (isinstance(h, str) and (h.endswith("_pct") or h.startswith("pct_") or h.endswith("_over_pct") or h == "Rec Prob %"))]
 
                         for c in pct_cols_excel:
                             ws.conditional_format(1, c, nrows, c, {
@@ -3297,9 +3378,9 @@ else:
                 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
                 st.session_state["hot_expand_open"] = True  # optional: reopen expanders after rerun
                 st.session_state["hot_last"] = {
-                    "per_metric_panels": per_metric_panels,         # dict[label] -> list[str]
-                    "display_df": display_df,                       # user-facing headers
-                    "styled_display": styled_display,               # styled DataFrame you showed
+                    "per_metric_panels": per_metric_panels,         # *** FIX 4: Save the FULL panel dict ***
+                    "display_df": display_df,                       
+                    "styled_display": styled_display,               
                     "csv_bytes": csv_bytes,
                     "excel_bytes": out_xlsx.getvalue(),
                     "csv_name": f"hot_sheet_{up_or_end}{'' if league_id else '_all'}_exploded.csv",
