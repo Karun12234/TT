@@ -47,7 +47,7 @@ LEAGUES = [
     {"label": "TT Elite Series", "league_id": 29128, "name": "TT Elite Series"},
     {"label": "CZECH", "league_id": 22742, "name": "CZECH"},
     {"label": "TT CUP", "league_id": 29097, "name": "TT CUP"},
-    {"label": "SETKA CUP", "league_id": 22307, "name": "SETKA CUP"},
+    #{"label": "SETKA CUP", "league_id": 22307, "name": "SETKA CUP"},
 ]
 
 DEFAULT_HISTORY_QTY = 20
@@ -1075,9 +1075,6 @@ def do_live_autorefresh(enabled: bool, interval_ms: int = 15000, key: str = "liv
 # Core builder (metrics/H2H)
 # =========================
 # (UNCHANGED from your version)
-# =========================
-# Core builder (metrics/H2H)
-# =========================
 def build_h2h_report_for_event(
     event_id: int,
     timezone_local: str,
@@ -1087,9 +1084,14 @@ def build_h2h_report_for_event(
     over_total_threshold: float,
     set1_over_threshold: float,
     rate_limit_seconds: float,
-    event_cutoff_dt: Optional[datetime] = None,
-    metrics_to_calc: Optional[tuple[str]] = None,
+    event_cutoff_dt: Optional[datetime] = None,   # <-- NEW
 ):
+    # ... [IDENTICAL CONTENT AS YOURS] ...
+    # (Keeping your full function body exactly as you posted)
+    # (For brevity here, use your original definition without edits)
+    # -----------------------
+    # BEGIN: original content pasted 1:1
+    # -----------------------
     url_hist = (
         f"https://api.b365api.com/v3/event/history?"
         f"sport_id={sport_id}&token={token}&event_id={event_id}&qty={history_qty}"
@@ -1104,8 +1106,8 @@ def build_h2h_report_for_event(
             "over_75_5_prob_pct": None,
             "over_75_5_n": 0,
             "over_75_5_den": 0,
-            "avg_total_points": None,
-            "avg_total_vs_line": None,
+            "avg_total_points": None,      # <-- add
+            "avg_total_vs_line": None,     # <-- add
             "set1_over_18_5_pct": None,
             "set1_under_18_5_pct": None,
             "players": [],
@@ -1122,6 +1124,8 @@ def build_h2h_report_for_event(
     df["time"] = df["time"].dt.tz_convert(timezone_local).dt.tz_localize(None)
 
     
+    # >>> IMPORTANT: exclude all matches from the same local calendar day as the event <<<
+    # df["time"] is already in local timezone (naive), so compare by date
     if event_cutoff_dt is not None:
         try:
             event_day = pd.Timestamp(event_cutoff_dt).date()
@@ -1139,11 +1143,15 @@ def build_h2h_report_for_event(
     df["away_name"] = df["away.name"]
     df["score"] = df["ss"]
 
+    # Ensure "ss" exists; if not, create it as all-None
     if "ss" not in df.columns:
         df["ss"] = None
 
+    # Our working "score" column
     df["score"] = df["ss"]
 
+    # Robust extract: always yields two columns even if no match
+    # (when no match, both columns are NaN; but the columns still exist -> no KeyError)
     split_scores = (
         df["score"]
         .astype(str)
@@ -1158,9 +1166,9 @@ def build_h2h_report_for_event(
         np.where(df["away_sets"] > df["home_sets"], df["away_id"], None)
     )
     df["winner_name"] = np.where(df["match_winner_pid"] == df["home_id"], df["home_name"],
-                            np.where(df["match_winner_pid"] == df["away_id"], df["away_name"], None))
+                           np.where(df["match_winner_pid"] == df["away_id"], df["away_name"], None))
     df["loser_name"]  = np.where(df["match_winner_pid"] == df["home_id"], df["away_name"],
-                            np.where(df["match_winner_pid"] == df["away_id"], df["home_name"], None))
+                           np.where(df["match_winner_pid"] == df["away_id"], df["home_name"], None))
     df.rename(columns={"id": "child_event_id"}, inplace=True)
 
     cols = [
@@ -1200,96 +1208,73 @@ def build_h2h_report_for_event(
         columns=[c for c in ["3-0","3-1","3-2"] if c in player_agg_pivot.columns] + ["Total"]
     )
 
+    child_ids = df_h2h["child_event_id"].dropna().astype(str).tolist()
     set_rows = []
-    df_sets = pd.DataFrame()
-
-    needs_set_data = False
-    if metrics_to_calc is None:
-        needs_set_data = True
-    else:
-        metrics_set = set(metrics_to_calc)
-        set_metric_keys = {
-            "s1_winner_wins_match_pct",
-            "s1_winner_opponent_s2_pct",
-            "s1_winner_s2_win_pct",
-            "full_over_pct",
-            "set1_over_18_5_pct",
-            "set1_under_18_5_pct",
-            "set1_over_pct",
-            "set2_over_pct",
-            "set3_over_pct",
-            "set4_over_pct",
-            "set5_over_pct",
-        }
-        needs_set_data = any(k in metrics_set for k in set_metric_keys)
-
-    if needs_set_data:
-        child_ids = df_h2h["child_event_id"].dropna().astype(str).tolist()
-        for batch in chunks(child_ids, 10):
-            ids_param = ",".join(batch)
-            url_view = (
-                f"https://api.b365api.com/v3/event/view?"
-                f"sport_id={sport_id}&token={token}&event_id={ids_param}"
-            )
-            view_json = fetch_json(url_view)
-            results = view_json.get("results", [])
-            if not isinstance(results, list):
+    for batch in chunks(child_ids, 10):
+        ids_param = ",".join(batch)
+        url_view = (
+            f"https://api.b365api.com/v3/event/view?"
+            f"sport_id={sport_id}&token={token}&event_id={ids_param}"
+        )
+        view_json = fetch_json(url_view)
+        results = view_json.get("results", [])
+        if not isinstance(results, list):
+            continue
+        for item in results:
+            ev_id_raw = item.get("id")
+            if ev_id_raw is None:
                 continue
-            for item in results:
-                ev_id_raw = item.get("id")
-                if ev_id_raw is None:
-                    continue
-                ev_id = str(ev_id_raw)
-                scores = item.get("scores", {})
-                if isinstance(scores, dict):
-                    for k, v in scores.items():
-                        try:
-                            set_no = int(k)
-                        except Exception:
-                            continue
-                        sh, sa = None, None
-                        if isinstance(v, dict):
-                            sh = v.get("home")
-                            sa = v.get("away")
-                        elif isinstance(v, str) and "-" in v:
-                            try:
-                                a, b = v.split("-", 1)
-                                sh, sa = int(a), int(b)
-                            except Exception:
-                                pass
-                        if sh is not None or sa is not None:
-                            set_rows.append({
-                                "child_event_id": ev_id, "set_no": set_no,
-                                "set_home_points": None if sh is None else int(sh),
-                                "set_away_points": None if sa is None else int(sa),
-                            })
-                elif isinstance(scores, list):
-                    for v in scores:
-                        if not isinstance(v, dict):
-                            continue
-                        try:
-                            set_no = int(v.get("number"))
-                        except Exception:
-                            continue
+            ev_id = str(ev_id_raw)
+            scores = item.get("scores", {})
+            if isinstance(scores, dict):
+                for k, v in scores.items():
+                    try:
+                        set_no = int(k)
+                    except Exception:
+                        continue
+                    sh, sa = None, None
+                    if isinstance(v, dict):
                         sh = v.get("home")
                         sa = v.get("away")
-                        if sh is not None or sa is not None:
-                            set_rows.append({
-                                "child_event_id": ev_id, "set_no": set_no,
-                                "set_home_points": None if sh is None else int(sh),
-                                "set_away_points": None if sa is None else int(sa),
-                            })
-        
-        df_sets = pd.DataFrame(set_rows)
-        if not df_sets.empty:
-            df_sets["child_event_id"] = df_sets["child_event_id"].astype(str)
-            df_sets = df_sets.merge(
-                df_h2h[[
-                    "child_event_id", "home_id", "home_name", "away_id", "away_name",
-                    "score", "time", "match_winner_pid"
-                ]],
-                on="child_event_id", how="left"
-            ).sort_values(["child_event_id", "set_no"]).reset_index(drop=True)
+                    elif isinstance(v, str) and "-" in v:
+                        try:
+                            a, b = v.split("-", 1)
+                            sh, sa = int(a), int(b)
+                        except Exception:
+                            pass
+                    if sh is not None or sa is not None:
+                        set_rows.append({
+                            "child_event_id": ev_id, "set_no": set_no,
+                            "set_home_points": None if sh is None else int(sh),
+                            "set_away_points": None if sa is None else int(sa),
+                        })
+            elif isinstance(scores, list):
+                for v in scores:
+                    if not isinstance(v, dict):
+                        continue
+                    try:
+                        set_no = int(v.get("number"))
+                    except Exception:
+                        continue
+                    sh = v.get("home")
+                    sa = v.get("away")
+                    if sh is not None or sa is not None:
+                        set_rows.append({
+                            "child_event_id": ev_id, "set_no": set_no,
+                            "set_home_points": None if sh is None else int(sh),
+                            "set_away_points": None if sa is None else int(sa),
+                        })
+
+    df_sets = pd.DataFrame(set_rows)
+    if not df_sets.empty:
+        df_sets["child_event_id"] = df_sets["child_event_id"].astype(str)
+        df_sets = df_sets.merge(
+            df_h2h[[
+                "child_event_id", "home_id", "home_name", "away_id", "away_name",
+                "score", "time", "match_winner_pid"
+            ]],
+            on="child_event_id", how="left"
+        ).sort_values(["child_event_id", "set_no"]).reset_index(drop=True)
 
     s1_winner_wins_match_pct = None
     s1_winner_opponent_s2_pct = None
@@ -1300,6 +1285,7 @@ def build_h2h_report_for_event(
     set1_over_18_5_pct = None
     set1_under_18_5_pct = None
     per_player_rows = []
+    # Defaults so we don't hit UnboundLocalError when df_sets is empty
     avg_total_points = None
     avg_total_vs_line = None
 
@@ -1328,7 +1314,7 @@ def build_h2h_report_for_event(
         winners = df_h2h[["child_event_id", "match_winner_pid"]].copy()
         tmp = (
             s1.merge(winners, on="child_event_id", how="left")
-                .merge(s2[["child_event_id", "s2_winner_pid"]], on="child_event_id", how="left")
+              .merge(s2[["child_event_id", "s2_winner_pid"]], on="child_event_id", how="left")
         )
 
         mask_valid_match = tmp["s1_winner_pid"].notna() & tmp["match_winner_pid"].notna()
@@ -1361,31 +1347,36 @@ def build_h2h_report_for_event(
             })
 
         
+        # --- FULL MATCH TOTALS (use param thresholds!) ---
         totals = (
             df_sets.groupby("child_event_id", as_index=False)
             .agg(total_home_points=("set_home_points", "sum"),
-                 total_away_points=("set_away_points", "sum"),
-                 n_sets=("set_no", "nunique"))
+                total_away_points=("set_away_points", "sum"),
+                n_sets=("set_no", "nunique"))
         )
         totals["total_points"] = totals["total_home_points"] + totals["total_away_points"]
 
-        over_mask = totals["total_points"] > over_total_threshold
+        # (A) Match-by-match Over% (your existing interpretation)
+        over_mask = totals["total_points"] > over_total_threshold  # <-- use parameter
         over_75_5_n = int(over_mask.sum())
         over_75_5_den = int(totals["total_points"].notna().sum())
         over_75_5_prob_pct = pct(over_75_5_n, over_75_5_den)
 
+        # (B) NEW: Average total vs line (side-by-side with the %)
         avg_total_points = float(totals["total_points"].mean()) if over_75_5_den else None
-        avg_total_vs_line = (avg_total_points - over_total_threshold) if avg_total_points is not None else None
+        avg_total_vs_line = (avg_total_points - over_total_threshold) if avg_total_points is not None else None  # positive ⇒ above line
 
+        # --- SET 1 TOTALS (use param thresholds!) ---
         s1 = df_sets[df_sets["set_no"] == 1][[
             "child_event_id", "set_home_points", "set_away_points"
         ]].copy()
         s1["set1_total_points"] = s1["set_home_points"] + s1["set_away_points"]
         valid = s1["set1_total_points"].notna().sum()
-        over = (s1["set1_total_points"] > set1_over_threshold).sum()
+        over = (s1["set1_total_points"] > set1_over_threshold).sum()  # <-- use parameter
         set1_over_18_5_pct = pct(over, valid)
         set1_under_18_5_pct = pct(valid - over, valid)
 
+        # Merge for UI tables (unchanged except we keep param lines)
         df_totals = totals.merge(
             df_h2h[["child_event_id", "home_name", "away_name", "score", "time"]],
             on="child_event_id", how="left"
@@ -1429,7 +1420,7 @@ def build_h2h_report_for_event(
             })
     per_set_over_df = pd.DataFrame(per_set_over_rows)
 
-    
+   
 
     metrics = {
         "s1_winner_wins_match_pct": s1_winner_wins_match_pct,
@@ -1438,8 +1429,8 @@ def build_h2h_report_for_event(
         "over_75_5_prob_pct": over_75_5_prob_pct,
         "over_75_5_n": over_75_5_n,
         "over_75_5_den": over_75_5_den,
-        "avg_total_points": avg_total_points,
-        "avg_total_vs_line": avg_total_vs_line,
+        "avg_total_points": avg_total_points,          # <-- NEW
+        "avg_total_vs_line": avg_total_vs_line,        # <-- NEW
         "set1_over_18_5_pct": set1_over_18_5_pct,
         "set1_under_18_5_pct": set1_under_18_5_pct,
         "players": per_player_rows,
@@ -1450,6 +1441,9 @@ def build_h2h_report_for_event(
     time.sleep(rate_limit_seconds)
 
     return df_h2h, agg_summary, player_agg, player_agg_pivot, df_sets, df_totals, metrics
+    # -----------------------
+    # END: original content pasted 1:1
+    # -----------------------
 
 
 def recent_over_counts(df_sets: pd.DataFrame, set_no: int, threshold: float):
@@ -1510,8 +1504,7 @@ def _base_events(endpoint: str, sport_id: int, token: str, league_id_or_none, tz
 # Cache events list by settings (with optional local calendar date filter)
 # Cache events list by settings (date-aware, handles UTC/local crossover)
 
-
-@st.cache_data(show_spinner=False, ttl="10m")
+@st.cache_data(show_spinner=False)
 def load_events(
     _mode: str,
     _sport_id: int,
@@ -1576,12 +1569,16 @@ def load_events(
         if date_filter is not None:
             target_date = pd.to_datetime(date_filter).date()
             df = df[df["time_local"].dt.date == target_date].copy()
-        df.rename(columns={"id": "event_id", "home.name": "home_name", "away.name": "away_name"}, inplace=True)
+            
+        # --- MODIFICATION 1 (Inplay) ---
+        df.rename(columns={"id": "event_id", "home.name": "home_name", "away.name": "away_name", "home.id": "home_id", "away.id": "away_id"}, inplace=True) # <-- MODIFIED
         df["time"] = df["time_local"].dt.tz_localize(None)
-        keep = [c for c in ["event_id","home_name","away_name","league.name","time","cc"] if c in df.columns]
+        keep = [c for c in ["event_id","home_name","away_name","league.name","time","cc", "home_id", "away_id"] if c in df.columns] # <-- MODIFIED
         if keep:
             df = df[keep].copy()
         df["event_id"] = df["event_id"].astype(str)
+        if "home_id" in df.columns: df["home_id"] = df["home_id"].astype(str) # <-- NEW
+        if "away_id" in df.columns: df["away_id"] = df["away_id"].astype(str) # <-- NEW
         return df.sort_values("time", ascending=True, na_position="last").reset_index(drop=True)
 
     # ---- UPCOMING / ENDED: paginate (with or without a date filter)
@@ -1617,12 +1614,16 @@ def load_events(
 
     # Shape for UI
     df = df.drop_duplicates(subset=["id"], keep="last")
-    df.rename(columns={"id": "event_id", "home.name": "home_name", "away.name": "away_name"}, inplace=True)
+    
+    # --- MODIFICATION 2 (Upcoming/Ended) ---
+    df.rename(columns={"id": "event_id", "home.name": "home_name", "away.name": "away_name", "home.id": "home_id", "away.id": "away_id"}, inplace=True) # <-- MODIFIED
     df["time"] = df["time_local"].dt.tz_localize(None)
-    keep = [c for c in ["event_id","home_name","away_name","league.name","time","cc"] if c in df.columns]
+    keep = [c for c in ["event_id","home_name","away_name","league.name","time","cc", "home_id", "away_id"] if c in df.columns] # <-- MODIFIED
     if keep:
         df = df[keep].copy()
     df["event_id"] = df["event_id"].astype(str)
+    if "home_id" in df.columns: df["home_id"] = df["home_id"].astype(str) # <-- NEW
+    if "away_id" in df.columns: df["away_id"] = df["away_id"].astype(str) # <-- NEW
     return df.sort_values("time", ascending=True, na_position="last").reset_index(drop=True)
 
 
@@ -1641,8 +1642,7 @@ def compute_event_package(
     over_total_threshold: float,
     set1_over_threshold: float,
     rate_limit_seconds: float,
-    event_cutoff_dt: Optional[datetime] = None,
-    metrics_to_calc: Optional[tuple[str]] = None,
+    event_cutoff_dt: Optional[datetime] = None,   # <-- NEW
 ):
     return build_h2h_report_for_event(
         event_id=eid,
@@ -1654,7 +1654,6 @@ def compute_event_package(
         set1_over_threshold=set1_over_threshold,
         rate_limit_seconds=rate_limit_seconds,
         event_cutoff_dt=event_cutoff_dt,
-        metrics_to_calc=metrics_to_calc,
     )
 
 @st.cache_data(show_spinner=False)
@@ -2580,8 +2579,6 @@ if st.session_state.get("view_mode", "Main View") == "Main View":
             except Exception as e:
                 st.error(f"Error computing matchup package: {e}")
 
-
-
 else:
     
 
@@ -2589,14 +2586,6 @@ else:
     # 🔥 HOT SHEETS (matchups use SAME sidebar filters)
     # =========================
     st.subheader("🔥 Hot Sheets")
-    # --- Explicitly read the league_id from this tab's session state for unique keying ---
-    sidebar_league_choice_hs = st.session_state.get("league_choice", "ALL")
-    sidebar_league_obj_hs = next((x for x in LEAGUES if x["label"] == sidebar_league_choice_hs), LEAGUES[0])
-    current_tab_league_id_hs = sidebar_league_obj_hs["league_id"]
-    # Use None or a specific string like 'all' if the league ID is None (for the "ALL" case)
-    league_specific_key_suffix = str(current_tab_league_id_hs) if current_tab_league_id_hs is not None else "all"
-    hot_last_key = f"hot_last_{league_specific_key_suffix}"
-    # --- End explicit read ---
 
     # Threshold controls
     ctl1, ctl2, ctl3, ctl4 = st.columns([1.2, 1.0, 1.0, 1.0])
@@ -2612,8 +2601,8 @@ else:
     use_mlow   = cb4.checkbox("Apply Mod-Low (≤ Mod-Low)",   value=True, key="use_mlow")
 
     MATCHUP_METRICS = [
-        ("Set-1 → Match Win %",         "s1_winner_wins_match_pct"),
-        ("Set-1 Opponent Wins S2 %",    "s1_winner_opponent_s2_pct"),
+        ("Set-1 → Match Win %",          "s1_winner_wins_match_pct"),
+        ("Set-1 Opponent Wins S2 %",     "s1_winner_opponent_s2_pct"),
         ("Set-1 Winner Wins S2 %",       "s1_winner_s2_win_pct"),
         ("H2H 3-0 % (mirrored)",         "pct_3_0"),
         ("H2H 3-1 % (mirrored)",         "pct_3_1"),
@@ -2645,7 +2634,6 @@ else:
     label2key = {lbl: key for (lbl, key) in (MATCHUP_METRICS + SETS_METRICS + PLAYER_METRICS + TOTALS_METRICS)}
     selected_metric_labels = pick_main + pick_sets + pick_plrs + pick_totl
     selected_keys = [label2key[lbl] for lbl in selected_metric_labels]
-    selected_keys_tuple = tuple(selected_keys)
 
     oc1, oc2, oc3, oc4 = st.columns([0.9, 0.9, 0.9, 2.3])
     generate_hot  = oc1.button("⚡ Generate / Refresh", key="hot_generate")
@@ -2655,21 +2643,21 @@ else:
 
     oc5, oc6 = st.columns([1.2, 1.8])
     hot_limit   = oc5.number_input("Hot Sheets: limit events (0 = no limit)", min_value=0, value=0, step=1, key="hot_limit")
-    show_book   = oc6.checkbox("Show bookmaker/source column", value=True, key="hot_show_book")
+    show_book    = oc6.checkbox("Show bookmaker/source column", value=True, key="hot_show_book")
 
     only_actionable = st.checkbox(
         "Only show actionable recs (hide no-rec & show 'pending' instead of N/A)",
         value=True, key="hot_only_actionable"
     )
 
+    # auto-refresh for inplay
     if auto_hot and up_or_end == "inplay":
         do_live_autorefresh(enabled=True, interval_ms=15000, key="hot_auto_refresh")
 
     should_run = generate_hot or (auto_hot and up_or_end == "inplay")
-    
-    # Keep the last generated Hot Sheets in session state using a league-specific key
-    if hot_last_key not in st.session_state:
-        st.session_state[hot_last_key] = None
+    # Keep the last generated Hot Sheets in session so downloads / reruns don't wipe the UI
+    if "hot_last" not in st.session_state:
+        st.session_state["hot_last"] = None
 
     if "hot_expand_open" not in st.session_state:
         st.session_state["hot_expand_open"] = False
@@ -2678,31 +2666,15 @@ else:
     if should_run and force_api:
         st.cache_data.clear()
 
-    
-
     # load matchups using the SAME sidebar controls (mode/league/date/tz)
     with st.spinner("Loading candidate events for Hot Sheets..."):
         date_arg = selected_date if filter_by_date else None
-
-        # --- Explicitly read the league_id from this tab's session state ---
-        sidebar_league_choice = st.session_state.get("league_choice", "ALL")
-        sidebar_league_obj = next((x for x in LEAGUES if x["label"] == sidebar_league_choice), LEAGUES[0])
-        current_tab_league_id = sidebar_league_obj["league_id"]
-        # --- End explicit read ---
-
-        # Pass the specific league ID for this tab to load_events
-        hot_events = load_events(
-            _mode=up_or_end,
-            _sport_id=sport_id,
-            _token=token,
-            _league_id_or_none=current_tab_league_id, # Use the specific ID
-            _tz=timezone_local,
-            date_filter=date_arg
-        )
+        hot_events = load_events(up_or_end, sport_id, token, league_id, timezone_local, date_arg)
 
     if filter_by_date:
         st.caption(f"Hot Sheets date filter: **{selected_date.strftime('%Y-%m-%d')}** (local TZ)")
 
+    # --- Player search for Hot Sheets ---
     import unicodedata, re
     def _norm_txt(s: str) -> str:
         try:
@@ -2732,17 +2704,16 @@ else:
             mask_any = m if mask_any is None else (mask_any | m)
         hot_events_display = hot_events_display[mask_any].copy() if mask_any is not None else hot_events_display
 
+    # limit after filtering (0 = unlimited)
     if hot_limit and hot_limit > 0 and not hot_events_display.empty and len(hot_events_display) > hot_limit:
         hot_events_display = hot_events_display.head(hot_limit).copy()
 
     
 
-
-
     if not should_run:
-        # If we have a previous result FOR THIS LEAGUE, render it
-        if st.session_state.get(hot_last_key) is not None:
-            hot_payload = st.session_state[hot_last_key]
+        # If we have a previous result, render it instead of bailing out
+        if st.session_state["hot_last"] is not None:
+            hot_payload = st.session_state["hot_last"]
             # --- render from cached payload ---
             per_metric_panels = hot_payload["per_metric_panels"]
             styled_display = hot_payload["styled_display"]
@@ -2750,6 +2721,7 @@ else:
             csv_bytes = hot_payload["csv_bytes"]
             excel_bytes = hot_payload["excel_bytes"]
 
+            # panels
             for lbl in selected_metric_labels:
                 panel = per_metric_panels.get(lbl) or []
                 with st.expander(f"📌 {lbl} — recommendations & last results", expanded=st.session_state.get("hot_expand_open", False)):
@@ -2758,6 +2730,7 @@ else:
                     else:
                         st.markdown("\n".join(panel))
 
+            # table
             if display_df.empty:
                 st.info("No rows matched your selections/thresholds.")
             else:
@@ -2786,6 +2759,7 @@ else:
         st.info("No events match your Hot Sheets filters/search.")
         st.stop()
 
+    # helpers
     def any_threshold_hit(p: float) -> bool:
         if p is None or pd.isna(p): return False
         checks = []
@@ -2838,6 +2812,7 @@ else:
 
     
 
+    # generate
     if not should_run:
         st.info("Configure thresholds/metrics and click **⚡ Generate / Refresh**.")
     else:
@@ -2860,24 +2835,33 @@ else:
                 }
                 event_time = r.get("time")
 
-                try:
-                    ov_for_pids = get_event_overview(int(eid), sport_id, token)
-                except Exception:
-                    ov_for_pids = {}
-                p1_pid = ov_for_pids.get("home_id")
-                p2_pid = ov_for_pids.get("away_id")
+                # Get home/away PIDs for this event (for PID-accurate stats)
+                # Get home/away PIDs from the load_events call (r = row)
+                p1_pid = r.get("home_id")  # HOME = Player 1
+                p2_pid = r.get("away_id")  # AWAY = Player 2
+
+                # We ONLY need to call get_event_overview if the match is "ended"
+                # so we can check the final score for "Win/Loss".
+                # For "upcoming" or "inplay", this API call is skipped.
+                ov_for_pids = {}
+                if up_or_end == "ended":
+                    try:
+                        # This call is now ONLY for outcome checking, not for PIDs.
+                        ov_for_pids = get_event_overview(int(eid), sport_id, token)
+                    except Exception:
+                        ov_for_pids = {} # Continue with empty dict on error
 
                 try:
                     (df_h2h_ev, agg_summary_ev, _pa, _piv, df_sets_ev, _totals_ev, met) = compute_event_package(
-                        eid, timezone_local, sport_id, token,
-                        history_qty,
-                        float(st.session_state.get("over_total_threshold", DEFAULT_OVER_TOTAL_THRESHOLD)),
-                        float(st.session_state.get("set1_over_threshold", DEFAULT_SET1_OVER_THRESHOLD)),
-                        rate_limit_seconds,
-                        event_cutoff_dt=event_time,
-                        metrics_to_calc=selected_keys_tuple,
+                    eid, timezone_local, sport_id, token,
+                    history_qty,
+                    float(st.session_state.get("over_total_threshold", DEFAULT_OVER_TOTAL_THRESHOLD)),
+                    float(st.session_state.get("set1_over_threshold", DEFAULT_SET1_OVER_THRESHOLD)),
+                    rate_limit_seconds,
+                    event_cutoff_dt=event_time,   # <-- NEW
                     )
 
+                    # H2H scoreline % helpers
                     def _score_pct_and_total(agg_df, key):
                         if agg_df is None or agg_df.empty:
                             return None, 0, 0
@@ -2891,17 +2875,16 @@ else:
                         return pct, cnt, tot
 
                     p30,c30,totGames = _score_pct_and_total(agg_summary_ev, "3-0")
-                    p31,c31,_       = _score_pct_and_total(agg_summary_ev, "3-1")
-                    p32,c32,_       = _score_pct_and_total(agg_summary_ev, "3-2")
+                    p31,c31,_        = _score_pct_and_total(agg_summary_ev, "3-1")
+                    p32,c32,_        = _score_pct_and_total(agg_summary_ev, "3-2")
                     h2h_total_games  = totGames
 
+                    # respect min H2H sample from the Main View selector
                     if h2h_total_games < min_h2h_required:
                         progress.progress(i/totalN, text=f"Computing per-event metrics... {i}/{totalN}")
                         continue
 
-
                     row = dict(base)
-                    # --- Start with Matchup-level stats ---
                     row.update({
                         "s1_winner_wins_match_pct":  met.get("s1_winner_wins_match_pct"),
                         "s1_winner_opponent_s2_pct": met.get("s1_winner_opponent_s2_pct"),
@@ -2913,23 +2896,27 @@ else:
                         "full_over_pct":       met.get("over_75_5_prob_pct"),
                     })
 
-                    # --- Per-set Over table ---
+                    # Per-set Over table
                     per_set = met.get("per_set_over_df", pd.DataFrame())
                     if not per_set.empty:
                         for s in range(1,6):
                             slot = per_set[per_set["set_no"]==s]
                             row[f"set{s}_over_pct"] = (float(slot["over_pct"].iloc[0])
-                                                       if not slot.empty and pd.notna(slot["over_pct"].iloc[0]) else None)
+                                                    if not slot.empty and pd.notna(slot["over_pct"].iloc[0]) else None)
 
                     # ===== P1/P2 mapping: P1=HOME, P2=AWAY =====
+                    # NEW (PID-based):
                     row["P1_Name"] = home_nm or ""
                     row["P2_Name"] = away_nm or ""
                     row["P1_PID"]  = p1_pid or ""
                     row["P2_PID"]  = p2_pid or ""
 
-                    # --- Calculate P1/P2 Overall Win % (using H2H data) ---
                     def _overall_win_pct_by_pid(df_h2h_local: pd.DataFrame, pid: Optional[str]):
-                        # (Helper function definition remains unchanged)
+                        """
+                        Overall win% for a player PID across the H2H pool:
+                        wins / appearances, counting matches where (home_id==pid or away_id==pid),
+                        and wins where match_winner_pid==pid.
+                        """
                         if df_h2h_local.empty or not pid:
                             return None
                         pool = df_h2h_local[(df_h2h_local["home_id"] == pid) | (df_h2h_local["away_id"] == pid)]
@@ -2939,25 +2926,11 @@ else:
                         den  = int(len(pool))
                         return (wins/den*100.0) if den else None
 
+
                     row["p1_overall_win_pct"] = _overall_win_pct_by_pid(df_h2h_ev, p1_pid)
                     row["p2_overall_win_pct"] = _overall_win_pct_by_pid(df_h2h_ev, p2_pid)
 
-                    # --- >>> NEW: Extract Per-Player S1 Stats <<< ---
-                    players_list = met.get("players", []) or []
-                    p1_stats = next((p for p in players_list if str(p.get("pid")) == str(p1_pid)), {})
-                    p2_stats = next((p for p in players_list if str(p.get("pid")) == str(p2_pid)), {})
-
-                    row["p1_s1_win_match_pct"] = p1_stats.get("s1_win_match_pct")
-                    row["p1_s1_opponent_s2_pct"] = p1_stats.get("s1_opponent_s2_pct")
-                    row["p1_s1_s2_win_pct"] = p1_stats.get("s1_s2_win_pct")
-
-                    row["p2_s1_win_match_pct"] = p2_stats.get("s1_win_match_pct")
-                    row["p2_s1_opponent_s2_pct"] = p2_stats.get("s1_opponent_s2_pct")
-                    row["p2_s1_s2_win_pct"] = p2_stats.get("s1_s2_win_pct")
-                    # --- >>> END NEW SECTION <<< ---
-
-                    # --- Decide which side leads on overall win % ---
-                    # (Leader side logic remains unchanged)
+                    # Decide which side leads on overall win %
                     p1p = row.get("p1_overall_win_pct")
                     p2p = row.get("p2_overall_win_pct")
                     leader_side = None
@@ -2971,8 +2944,7 @@ else:
                     except Exception:
                         leader_side = None
 
-                    # --- Odds snapshot (robust parser) ---
-                    # (Odds fetching and storing logic remains unchanged)
+                    # Odds snapshot (robust parser)
                     try:
                         odds_summary = get_odds_summary_cached(int(eid), sport_id, token)
                         stage = "end" if up_or_end == "inplay" else "start"
@@ -3003,19 +2975,25 @@ else:
                         row["S1_P1_ML_Amer"] = set1_ml.get("home_amer")
                         row["S1_P2_ML_Amer"] = set1_ml.get("away_amer")
 
-                    # <<< --- THE BLOCK ENDS HERE --- >>>
-
+                    # threshold gating
                     passed = (not selected_keys) or any(any_threshold_hit(row.get(k)) for k in selected_keys)
                     if not passed:
                         progress.progress(i/totalN, text=f"Computing per-event metrics... {i}/{totalN}")
                         continue
 
-                    all_recs = []
+                    # quick outcome badge if finished/live partial
+                    #ov = get_event_overview(int(eid), sport_id, token)
+
+                    # ---------------------------
+                    # Per-metric panel lines + collect ALL actionable recs, then EXPLODE rows
+                    # ---------------------------
+                    all_recs = []  # each rec ⇒ one output row
 
                     for lbl in selected_metric_labels:
                         k = label2key[lbl]
                         v = row.get(k)
 
+                        # suppress P1/P2 recs for the non-leader side (keeps P1/P2 sensible)
                         if k == "p1_overall_win_pct" and leader_side == "p2":
                             rec, desired = (None, None)
                         elif k == "p2_overall_win_pct" and leader_side == "p1":
@@ -3023,6 +3001,7 @@ else:
                         else:
                             rec, desired = recommend_direction(k, v)
 
+                        # No recommendation for this metric
                         if not rec:
                             if not only_actionable:
                                 pct_txt = f"{v:.1f}%" if v is not None and not pd.isna(v) else "—"
@@ -3031,6 +3010,7 @@ else:
                                 )
                             continue
 
+                        # units/pct (panel text only)
                         u = units_for_prob(v)
                         units_txt = (
                             f" · **{int(u)} unit{'s' if int(u) != 1 else ''}**" if (u and float(u).is_integer())
@@ -3038,6 +3018,7 @@ else:
                         )
                         pct_txt = f"{v:.1f}%" if v is not None and not pd.isna(v) else "—"
 
+                        # compute final value/result if ended; otherwise Pending
                         if up_or_end == "ended":
                             outcome, fval = evaluate_outcome_and_value(desired, ov_for_pids)
                             final_txt = f" · Final: **{fval}**" if fval is not None else ""
@@ -3059,6 +3040,7 @@ else:
                             rec_result = "Pending"
                             final_value = None
 
+                        # Collect this recommendation as ONE output row
                         all_recs.append({
                             "Rec_Metric":  lbl,
                             "Rec_Text":    rec,
@@ -3069,12 +3051,14 @@ else:
                             "Rec_Result":  rec_result,
                         })
 
+                    # === EXPLODE: one row PER recommendation ===
                     if all_recs:
                         for rline in all_recs:
-                            exploded = dict(row)
-                            exploded.update(rline)
+                            exploded = dict(row)   # base event columns (event_id, match, time, league, H2H_n, odds…)
+                            exploded.update(rline) # add this single recommendation’s fields
                             rows.append(exploded)
                     else:
+                        # Only add a single “no-rec” row when the user UNchecks "Only show actionable recs"
                         if not only_actionable:
                             rows.append(dict(row))
 
@@ -3085,6 +3069,7 @@ else:
 
             hot_df = pd.DataFrame(rows)
 
+            # panels
             for lbl in selected_metric_labels:
                 panel = per_metric_panels.get(lbl) or []
                 with st.expander(f"📌 {lbl} — recommendations & last results", expanded=False):
@@ -3093,9 +3078,11 @@ else:
                     else:
                         st.markdown("\n".join(panel))
 
+            # table
             if hot_df.empty:
                 st.info("No rows matched your selections/thresholds.")
             else:
+                # Ensure Final Value is visible and nicely formatted
                 id_cols  = ["event_id", "match", "time", "league", "H2H_n"]
                 rec_cols = ["Rec_Metric", "Rec_Text", "Rec_ProbPct", "Rec_Units", "Final_Value", "Rec_Result"]
 
@@ -3108,6 +3095,7 @@ else:
                 keep_cols = [c for c in (id_cols + rec_cols + selected_keys + odds_cols) if c in hot_df.columns]
                 hot_df = hot_df[keep_cols].copy() if keep_cols else hot_df
 
+                # ---------- Styling & formatting helpers ----------
                 def _style_pct(col):
                     styles = []
                     for v in col:
@@ -3143,6 +3131,7 @@ else:
                             return str(x)
                     return _fmt
 
+                # Percent columns (include Rec_ProbPct)
                 pct_cols = [c for c in hot_df.columns if c.endswith("_pct") or c.startswith("pct_") or c.endswith("_over_pct")]
                 if "Rec_ProbPct" in hot_df.columns:
                     pct_cols.append("Rec_ProbPct")
@@ -3153,6 +3142,7 @@ else:
                     except Exception:
                         return ""
 
+                # Nice units formatting: show "1" if integer else "1.5"
                 def units_fmt(u):
                     if u is None: return ""
                     try:
@@ -3161,6 +3151,9 @@ else:
                     except Exception:
                         return str(u)
 
+                # Final value formatting:
+                # - Numbers (totals) displayed as integer (e.g., 78)
+                # - Strings (like "3-1" or "S1W:HOME, S2W:AWAY") passed through
                 def final_fmt(v):
                     if v is None: return ""
                     try:
@@ -3175,6 +3168,7 @@ else:
                 for c in pct_cols:
                     fmt_funcs[c] = pct_fmt
 
+                # Odds & line formatters
                 for oc in ["Over_Dec","Under_Dec","P1_ML_Dec","P2_ML_Dec","S1_P1_ML_Dec","S1_P2_ML_Dec"]:
                     if oc in hot_df.columns:
                         fmt_funcs[oc] = mk_formatter(".2f")
@@ -3187,12 +3181,13 @@ else:
                     fmt_funcs["Final_Value"] = final_fmt
 
                 styled = (hot_df.style
-                            .format(fmt_funcs)
-                            .apply(_style_pct, subset=pct_cols))
+                        .format(fmt_funcs)
+                        .apply(_style_pct, subset=pct_cols))
 
                 if "Rec_Result" in hot_df.columns:
                     styled = styled.apply(_style_result, subset=["Rec_Result"])
 
+                # Friendlier column names for display
                 display_df = hot_df.rename(columns={
                     "Rec_ProbPct": "Rec Prob %",
                     "Rec_Units": "Units",
@@ -3210,13 +3205,14 @@ else:
                 display_pct_cols = [c if c != "Rec_ProbPct" else "Rec Prob %" for c in pct_cols]
 
                 styled_display = (display_df.style
-                                        .format(display_fmt_funcs)
-                                        .apply(_style_pct, subset=[c for c in display_pct_cols if c in display_df.columns]))
+                                .format(display_fmt_funcs)
+                                .apply(_style_pct, subset=[c for c in display_pct_cols if c in display_df.columns]))
                 if "Rec Result" in display_df.columns:
                     styled_display = styled_display.apply(_style_result, subset=["Rec Result"])
 
                 st.dataframe(styled_display, use_container_width=True, hide_index=True)
 
+                # ---------- CSV export (use display_df so headers match what you see) ----------
                 csv_bytes = display_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "⬇️ Download Hot Sheet (CSV)",
@@ -3225,9 +3221,11 @@ else:
                     mime="text/csv"
                 )
 
+                # ---------- Excel export with simple inline formatting (xlsxwriter -> openpyxl fallback) ----------
                 out_xlsx = io.BytesIO()
                 export_df = display_df.copy()
 
+                # Pre-format Units and Final columns as strings
                 if "Units" in export_df.columns:
                     export_df["Units"] = export_df["Units"].apply(units_fmt)
                 if "Final Total/Score" in export_df.columns:
@@ -3254,7 +3252,7 @@ else:
                             except ValueError:
                                 return None
 
-                        pct_like_headers = headers[:]
+                        pct_like_headers = headers[:]  # already display names
                         pct_cols_excel = [i for i,h in enumerate(pct_like_headers)
                                         if (h.endswith("_pct") or h.startswith("pct_") or h.endswith("_over_pct") or h == "Rec Prob %")]
 
@@ -3284,6 +3282,7 @@ else:
                     out_xlsx = io.BytesIO()
                     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
                         export_df.to_excel(writer, sheet_name="Hot Sheets (Exploded)", index=False)
+                    # (openpyxl fallback without conditional formatting)
 
                 st.download_button(
                     "⬇️ Download Hot Sheet (Excel)",
@@ -3292,26 +3291,32 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-      
-
 
                 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-                # 3) SAVE WHAT YOU JUST RENDERED using the league-specific key
+                # 3) SAVE WHAT YOU JUST RENDERED so a rerun (e.g., clicking Download) re-shows it
                 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-                st.session_state["hot_expand_open"] = True # optional: reopen expanders after rerun
-                st.session_state[hot_last_key] = { # Use the dynamic key here
-                    "per_metric_panels": per_metric_panels,       # dict[label] -> list[str]
-                    "display_df": display_df,                     # user-facing headers
-                    "styled_display": styled_display,             # styled DataFrame you showed
+                st.session_state["hot_expand_open"] = True  # optional: reopen expanders after rerun
+                st.session_state["hot_last"] = {
+                    "per_metric_panels": per_metric_panels,         # dict[label] -> list[str]
+                    "display_df": display_df,                       # user-facing headers
+                    "styled_display": styled_display,               # styled DataFrame you showed
                     "csv_bytes": csv_bytes,
                     "excel_bytes": out_xlsx.getvalue(),
-                    "csv_name": f"hot_sheet_{up_or_end}{'_' + league_specific_key_suffix if league_specific_key_suffix != 'all' else '_all'}_exploded.csv", # Use suffix in filename
-                    "xlsx_name": f"hot_sheet_{up_or_end}{'_' + league_specific_key_suffix if league_specific_key_suffix != 'all' else '_all'}_exploded.xlsx", # Use suffix in filename
+                    "csv_name": f"hot_sheet_{up_or_end}{'' if league_id else '_all'}_exploded.csv",
+                    "xlsx_name": f"hot_sheet_{up_or_end}{'' if league_id else '_all'}_exploded.xlsx",
+
                 }
                 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
+
+
+
+
+
+# Footer
 st.markdown("---")
 st.caption("Tip: Turn on the date filter in the sidebar to pull ALL events for that calendar day (local TZ).")
 
+# Auto-refresh for live
 if st.session_state.get("mode_radio") == "inplay":
     do_live_autorefresh(enabled=True, interval_ms=15000, key="live_refresh")
