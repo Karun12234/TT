@@ -2657,6 +2657,7 @@ else:
     should_run = generate_hot or (auto_hot and up_or_end == "inplay")
     
     # --- State Initialization (Corrected) ---
+    # --- State Initialization (Corrected) ---
     if "hot_last" not in st.session_state:
         st.session_state["hot_last"] = None
     if "hot_expand_open" not in st.session_state:
@@ -2670,9 +2671,17 @@ else:
     if "hot_last_settings" not in st.session_state:
         st.session_state["hot_last_settings"] = None
 
+    # === Sidebar filters (needed for settings check) ===
+    date_arg = selected_date if filter_by_date else None
+    
     # --- Settings Check (Corrected) ---
-    # Create a unique key based on ALL settings that affect the output
     current_settings = (
+        # =====> FIX 2: Add main sidebar filters to the settings check <=====
+        league_id,
+        up_or_end,
+        str(date_arg), # Convert date to string to make it hashable
+        
+        # Hot Sheet UI filters
         tuple(sorted(selected_keys)),
         hi2_val, lo2_val, hi1_val, lo1_val,
         use_high, use_low, use_mhigh, use_mlow,
@@ -2680,28 +2689,36 @@ else:
         history_qty,
         over_total_threshold,
         set1_over_threshold,
-        only_actionable, # This was missing
-        hot_limit # This was missing
+        only_actionable,
+        hot_limit
     )
     settings_changed = (st.session_state["hot_last_settings"] != current_settings)
 
-    # --- Force Refresh Logic (Corrected) ---
-    if (should_run and force_api) or (should_run and settings_changed):
+    # --- Refresh Logic (CORRECTED) ---
+    # ALWAYS clear the data cache if we intend to run (to get fresh event list)
+    if should_run:
         st.cache_data.clear()
-        st.session_state["hot_processed_ids"] = set()
-        st.session_state["hot_processed_rows"] = []
-        st.session_state["hot_processed_panels"] = {lbl: [] for lbl in selected_metric_labels} # Reset panels
-        st.session_state["hot_last_settings"] = current_settings # Store the new settings
-        if settings_changed and not force_api:
-            st.info("Settings changed. Re-calculating all matches...")
-        else:
-            st.info("Cache and processed list cleared. Re-calculating all matches...")
 
+        # BUT, only clear the *processing state* if forcing or settings changed
+        if force_api or settings_changed:
+            st.session_state["hot_processed_ids"] = set()
+            st.session_state["hot_processed_rows"] = []
+            st.session_state["hot_processed_panels"] = {lbl: [] for lbl in selected_metric_labels} # Reset panels
+            st.session_state["hot_last_settings"] = current_settings # Store the new settings
+            if settings_changed and not force_api:
+                st.info("Settings changed. Re-calculating all matches...")
+            elif force_api: # Added elif for clarity
+                st.info("Cache and processed list cleared. Re-calculating all matches...")
+        # If should_run is True, but NOT force_api and NOT settings_changed,
+        # we proceed without clearing processed state, allowing incremental updates.
 
     # load matchups using the SAME sidebar controls (mode/league/date/tz)
+    # This will now ALWAYS hit the API if should_run was True because we cleared the cache above
     with st.spinner("Loading candidate events for Hot Sheets..."):
         date_arg = selected_date if filter_by_date else None
         hot_events = load_events(up_or_end, sport_id, token, league_id, timezone_local, date_arg)
+
+    # ... (The rest of the Hot Sheets code remains the same as the previous version) ...
 
     if filter_by_date:
         st.caption(f"Hot Sheets date filter: **{selected_date.strftime('%Y-%m-%d')}** (local TZ)")
@@ -2888,8 +2905,15 @@ else:
                 progress.progress(1.0, text="No new matches to process.")
 
             # 5. Loop over NEW matches only
+            # 5. Loop over NEW matches only
             for i, (_, r) in enumerate(events_to_process_df.iterrows(), start=1):
                 eid = int(r["event_id"]) if str(r["event_id"]).isdigit() else r["event_id"]
+
+                # =====> FIX 1: Add the ID to the processed set *immediately* <=====
+                # This ensures that even if it's skipped (e.g., min H2H),
+                # it won't be processed again on the next run.
+                st.session_state.setdefault("hot_processed_ids", set()).add(str(eid))
+
                 home_nm = r.get("home_name", "")
                 away_nm = r.get("away_name", "")
 
